@@ -3,10 +3,10 @@ const https = require("https");
 
 const app = express();
 
-const symbols = ["AAPL","MSFT","GOOGL","AMZN","META"];
+const symbols = ["AAPL", "MSFT", "GOOGL", "AMZN", "META"];
 
 const UPDATE_URL = "https://dpwl.atwebpages.com/share/api_update.php?secret=update_secret";
-const INDEX_URL  = "https://dpwl.atwebpages.com/share/update_index.php?key=my_secure_key_123";
+const INDEX_URL = "https://dpwl.atwebpages.com/share/update_index.php?key=my_secure_key_123";
 
 function getJson(url) {
   return new Promise((resolve, reject) => {
@@ -16,52 +16,108 @@ function getJson(url) {
         headers: {
           "User-Agent": "Mozilla/5.0",
           "Accept": "application/json"
-        },
+        }
       },
       (res) => {
         let data = "";
-        res.on("data", (c) => (data += c));
+
+        res.on("data", chunk => {
+          data += chunk;
+        });
+
         res.on("end", () => {
           try {
             resolve(JSON.parse(data));
           } catch {
-            reject(new Error("Invalid JSON"));
+            reject(new Error("Invalid JSON response"));
           }
         });
       }
-    ).on("error", (err) => reject(err));
+    ).on("error", err => reject(err));
   });
 }
 
 function hitUrl(url) {
   return new Promise((resolve) => {
-    https.get(url, () => resolve(true)).on("error", () => resolve(false));
+    https.get(
+      url,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0"
+        }
+      },
+      (res) => {
+        let data = "";
+
+        res.on("data", chunk => {
+          data += chunk;
+        });
+
+        res.on("end", () => {
+          resolve({
+            statusCode: res.statusCode,
+            body: data
+          });
+        });
+      }
+    ).on("error", (err) => {
+      resolve({
+        statusCode: 0,
+        body: err.message
+      });
+    });
   });
 }
 
 async function fetchFromYahooChart(symbol) {
-  // v8 chart API (reliable)
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1d&interval=1m`;
   const json = await getJson(url);
 
   const result = json.chart?.result?.[0];
-  if (!result) throw new Error("No chart result");
+
+  if (!result) {
+    throw new Error("No chart result");
+  }
 
   const meta = result.meta || {};
   const quote = result.indicators?.quote?.[0] || {};
 
-  const price = meta.regularMarketPrice ?? (quote.close?.slice(-1)[0]);
-  const open  = meta.regularMarketOpen ?? (quote.open?.[0]);
-  const high  = meta.regularMarketDayHigh ?? Math.max(...(quote.high || [price]));
-  const low   = meta.regularMarketDayLow  ?? Math.min(...(quote.low  || [price]));
+  const closeList = Array.isArray(quote.close) ? quote.close.filter(v => v) : [];
+  const openList  = Array.isArray(quote.open)  ? quote.open.filter(v => v)  : [];
+  const highList  = Array.isArray(quote.high)  ? quote.high.filter(v => v)  : [];
+  const lowList   = Array.isArray(quote.low)   ? quote.low.filter(v => v)   : [];
 
-  if (!price) throw new Error("No price");
+  const price =
+    meta.regularMarketPrice ||
+    closeList[closeList.length - 1];
 
-  return { price, open: open || price, high: high || price, low: low || price };
+  const open =
+    meta.regularMarketOpen ||
+    openList[0] ||
+    price;
+
+  const high =
+    meta.regularMarketDayHigh ||
+    (highList.length ? Math.max(...highList) : price);
+
+  const low =
+    meta.regularMarketDayLow ||
+    (lowList.length ? Math.min(...lowList) : price);
+
+  if (!price || price <= 0) {
+    throw new Error("No price");
+  }
+
+  return {
+    price: Number(price),
+    open: Number(open),
+    high: Number(high),
+    low: Number(low)
+  };
 }
 
 app.get("/", (req, res) => {
-  res.send("Worker running");
+  res.send("Stock worker running");
 });
 
 app.get("/run", async (req, res) => {
@@ -71,26 +127,48 @@ app.get("/run", async (req, res) => {
     try {
       const { price, open, high, low } = await fetchFromYahooChart(symbol);
 
-      const url =
-        `${UPDATE_URL}&symbol=${symbol}&price=${price}&open=${open}&high=${high}&low=${low}`;
+      const updateUrl =
+        `${UPDATE_URL}&symbol=${encodeURIComponent(symbol)}` +
+        `&price=${encodeURIComponent(price)}` +
+        `&open=${encodeURIComponent(open)}` +
+        `&high=${encodeURIComponent(high)}` +
+        `&low=${encodeURIComponent(low)}`;
 
-      await hitUrl(url);
+      const updateResponse = await hitUrl(updateUrl);
 
-      results.push({ symbol, success: true, source: "yahoo-chart", price });
+      results.push({
+        symbol,
+        success: true,
+        source: "yahoo-chart",
+        price,
+        open,
+        high,
+        low,
+        updateResponse
+      });
+
     } catch (e) {
-      results.push({ symbol, success: false, error: String(e.message || e) });
+      results.push({
+        symbol,
+        success: false,
+        error: String(e.message || e)
+      });
     }
   }
 
-  await hitUrl(INDEX_URL);
+  const indexResponse = await hitUrl(INDEX_URL);
 
   res.json({
     success: true,
     message: "Worker completed",
     results,
-    time: new Date().toISOString(),
+    indexResponse,
+    time: new Date().toISOString()
   });
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("Server started"));
+
+app.listen(PORT, () => {
+  console.log("Server started on port " + PORT);
+});
