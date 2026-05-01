@@ -3,15 +3,14 @@ const https = require("https");
 
 const app = express();
 
-const API_KEY = "CFAREV2J5MLA1IXX";
-const symbols = ["AAPL","MSFT","GOOGL","AMZN","META"];
+const symbols = ["AAPL", "MSFT", "GOOGL", "AMZN", "META"];
 
 const UPDATE_URL = "https://dpwl.atwebpages.com/share/api_update.php?secret=update_secret";
 const INDEX_URL = "https://dpwl.atwebpages.com/share/update_index.php?key=my_secure_key_123";
 
 function getJson(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
+    https.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
       let data = "";
       res.on("data", chunk => data += chunk);
       res.on("end", () => {
@@ -27,57 +26,73 @@ function getJson(url) {
 
 function hitUrl(url) {
   return new Promise((resolve) => {
-    https.get(url, () => resolve()).on("error", () => resolve());
+    https.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, () => resolve(true))
+      .on("error", () => resolve(false));
   });
 }
 
-function delay(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-app.get("/run", async (req, res) => {
+async function runUpdate() {
   const results = [];
 
   for (const symbol of symbols) {
     try {
-      const apiUrl = `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${API_KEY}`;
+      const apiUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`;
       const json = await getJson(apiUrl);
 
-      const q = json["Global Quote"];
-      const price = q?.["05. price"];
-      const open = q?.["02. open"];
-      const high = q?.["03. high"];
-      const low = q?.["04. low"];
+      const q = json.quoteResponse?.result?.[0];
 
-      if (!price) throw new Error("No price");
+      if (!q || !q.regularMarketPrice) {
+        throw new Error("Yahoo price not found");
+      }
 
-      const url = `${UPDATE_URL}&symbol=${symbol}&price=${price}&open=${open}&high=${high}&low=${low}`;
+      const price = q.regularMarketPrice;
+      const open  = q.regularMarketOpen || price;
+      const high  = q.regularMarketDayHigh || price;
+      const low   = q.regularMarketDayLow || price;
 
-      await hitUrl(url);
+      const updateUrl =
+        `${UPDATE_URL}&symbol=${symbol}&price=${price}&open=${open}&high=${high}&low=${low}`;
 
-      results.push({ symbol, success: true, price });
+      await hitUrl(updateUrl);
 
-      await delay(15000);
+      results.push({
+        symbol,
+        success: true,
+        source: "Yahoo Finance",
+        price
+      });
 
     } catch (e) {
-      results.push({ symbol, success: false, error: String(e) });
+      results.push({
+        symbol,
+        success: false,
+        error: String(e.message || e)
+      });
     }
   }
 
   await hitUrl(INDEX_URL);
 
+  return results;
+}
+
+app.get("/", (req, res) => {
+  res.send("Stock worker running");
+});
+
+app.get("/run", async (req, res) => {
+  const results = await runUpdate();
+
   res.json({
     success: true,
+    message: "Worker completed",
     results,
     time: new Date().toISOString()
   });
 });
 
-app.get("/", (req,res)=>{
-  res.send("Worker running");
-});
-
 const PORT = process.env.PORT || 10000;
+
 app.listen(PORT, () => {
   console.log("Server started");
 });
